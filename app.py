@@ -166,3 +166,8 @@ if uploaded_file is not None:
 else:
     st.info("Por favor, carga el archivo CSV exportado desde Plickers para generar el reporte completo.")
 
+
+else:
+    st.info("Por favor, carga el archivo CSV exportado desde Plickers para generar el reporte completo.")
+
+
