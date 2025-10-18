@@ -5,32 +5,40 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 # ----------------------------------------------------------
-# Función para procesar automáticamente el CSV de Plickers
+# Función: identificar automáticamente dónde comienzan los encabezados
 # ----------------------------------------------------------
 def procesar_archivo(archivo_csv):
     try:
-        # Leer el archivo sin asumir encabezado
-        df_raw = pd.read_csv(archivo_csv, encoding="utf-8", header=None, on_bad_lines='skip')
-
+        # Leer el CSV sin encabezados (por si tiene texto previo)
+        df_raw = pd.read_csv(archivo_csv, header=None, encoding="utf-8", on_bad_lines="skip")
+        
         # Buscar la fila que contiene "Card Number"
-        start_index = df_raw[df_raw.apply(lambda row: row.astype(str).str.contains("Card Number").any(), axis=1)].index
-        if len(start_index) == 0:
+        encabezado_idx = None
+        for i, row in df_raw.iterrows():
+            if any("Card Number" in str(cell) for cell in row):
+                encabezado_idx = i
+                break
+
+        if encabezado_idx is None:
             raise ValueError("No se encontró la fila de encabezados ('Card Number') en el CSV.")
-        start_index = start_index[0]
-
-        # Cargar el dataset desde esa fila
-        df = pd.read_csv(archivo_csv, encoding="utf-8", skiprows=start_index)
-
-        # Eliminar filas vacías
+        
+        # Leer nuevamente el archivo desde esa fila
+        df = pd.read_csv(archivo_csv, skiprows=encabezado_idx, encoding="utf-8")
         df = df.dropna(how="all")
-        df.columns = [col.strip() for col in df.columns]
-
-        # Detectar columnas base
-        columnas_clave = [c for c in df.columns if c.lower() in [
-            "card number", "first name", "last name", "score", "correct", "answered"
-        ]]
-        columnas_preguntas = [c for c in df.columns if c not in columnas_clave]
-        df = df[columnas_clave + columnas_preguntas]
+        
+        # Limpiar espacios y caracteres
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        # Validar columnas clave
+        columnas_base = ["Card Number", "First name", "Last Name", "Score", "Correct", "Answered"]
+        columnas_presentes = [c for c in columnas_base if c in df.columns]
+        
+        if len(columnas_presentes) < 4:
+            raise ValueError("El archivo no tiene las columnas esperadas de Plickers.")
+        
+        # Filtrar datos válidos
+        df = df[df["First name"].notna()]
+        df = df[df["First name"] != ""]
 
         return df
 
@@ -40,55 +48,68 @@ def procesar_archivo(archivo_csv):
 
 
 # ----------------------------------------------------------
-# Análisis de resultados y generación de sugerencias
+# Función: análisis del desempeño y generación de sugerencias
 # ----------------------------------------------------------
 def analizar_resultados(df):
-    # Calcular promedio general
-    promedio = df['Score'].mean() if 'Score' in df.columns else None
+    # Normalizar y limpiar datos
+    df["Score"] = df["Score"].replace("-", "0").replace("%", "", regex=True)
+    df["Score"] = pd.to_numeric(df["Score"], errors="coerce").fillna(0)
+    df["Correct"] = pd.to_numeric(df["Correct"], errors="coerce").fillna(0)
+    df["Answered"] = pd.to_numeric(df["Answered"], errors="coerce").replace(0, 1)
 
-    # Generar sugerencias por alumno
+    promedio = df["Score"].mean()
+
     sugerencias = []
-    for i, row in df.iterrows():
-        nombre = f"{row.get('First name', '')} {row.get('Last name', '')}".strip()
-        score = row.get('Score', 0)
-        correctas = row.get('Correct', 0)
-        total = row.get('Answered', 1)
-        porcentaje = (correctas / total) * 100 if total > 0 else 0
-
-        if porcentaje < 50:
-            sugerencia = "Reforzar conceptos básicos del tema. Se recomienda repasar los fundamentos con ejemplos prácticos y actividades visuales."
-        elif porcentaje < 80:
-            sugerencia = "Buen desempeño, aunque es recomendable realizar ejercicios de aplicación y análisis de casos."
+    for _, row in df.iterrows():
+        nombre = f"{row['First name']} {row['Last Name']}".strip()
+        aciertos = (row["Correct"] / row["Answered"]) * 100
+        if aciertos < 50:
+            rec = "Reforzar conceptos fundamentales. Se recomienda repasar los temas básicos y realizar ejercicios guiados."
+        elif aciertos < 80:
+            rec = "Buen desempeño general. Puede mejorar con actividades prácticas y debates reflexivos."
         else:
-            sugerencia = "Excelente resultado. Puede avanzar hacia actividades de síntesis o proyectos de integración."
+            rec = "Excelente comprensión. Se recomienda avanzar a proyectos aplicados o tutorías de apoyo a compañeros."
 
         sugerencias.append({
             "Alumno": nombre,
-            "Aciertos (%)": round(porcentaje, 2),
-            "Recomendación": sugerencia
+            "Aciertos (%)": round(aciertos, 2),
+            "Recomendación": rec
         })
 
-    return promedio, sugerencias
+    # Detectar preguntas más falladas
+    preguntas = [c for c in df.columns if c not in ["Card Number", "First name", "Last Name", "Score", "Correct", "Answered"]]
+    resumen_preguntas = []
+    for pregunta in preguntas:
+        respuestas = df[pregunta].value_counts()
+        if len(respuestas) > 0:
+            pregunta_info = {
+                "Pregunta": pregunta[:80],
+                "Opción más frecuente": respuestas.index[0],
+                "Veces respondida": respuestas.iloc[0]
+            }
+            resumen_preguntas.append(pregunta_info)
+
+    return promedio, sugerencias, resumen_preguntas
 
 
 # ----------------------------------------------------------
-# Generación del reporte PDF
+# Función: generación del PDF de reporte
 # ----------------------------------------------------------
-def generar_pdf(promedio, sugerencias, nombre_asignatura):
+def generar_pdf(promedio, sugerencias, resumen_preguntas, asignatura):
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=letter)
-    pdf.setTitle("Reporte de Análisis Plickers IA")
+    pdf.setTitle("Reporte Plickers - Análisis IA")
 
     pdf.setFont("Helvetica-Bold", 14)
-    pdf.drawString(200, 750, "Reporte de Análisis Plickers IA")
+    pdf.drawString(180, 760, "Reporte de Análisis Plickers con IA")
 
     pdf.setFont("Helvetica", 11)
-    pdf.drawString(50, 720, f"Asignatura: {nombre_asignatura}")
-    pdf.drawString(50, 705, f"Promedio general del grupo: {round(promedio,2) if promedio else 'N/A'}%")
+    pdf.drawString(50, 735, f"Asignatura: {asignatura}")
+    pdf.drawString(50, 720, f"Promedio general del grupo: {round(promedio, 2)}%")
 
-    y = 680
+    y = 700
     pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(50, y, "Sugerencias por alumno:")
+    pdf.drawString(50, y, "Sugerencias Individuales:")
     y -= 20
     pdf.setFont("Helvetica", 10)
 
@@ -99,7 +120,20 @@ def generar_pdf(promedio, sugerencias, nombre_asignatura):
         pdf.drawString(50, y, f"{s['Alumno']} - {s['Aciertos (%)']}% - {s['Recomendación']}")
         y -= 15
 
+    # Nueva página: resumen docente
     pdf.showPage()
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(50, 750, "Resumen de Preguntas y Sugerencias para Rediseño Docente")
+    pdf.setFont("Helvetica", 10)
+    y = 720
+    for p in resumen_preguntas:
+        if y < 100:
+            pdf.showPage()
+            y = 750
+        pdf.drawString(50, y, f"Pregunta: {p['Pregunta']}")
+        pdf.drawString(60, y - 12, f"Opción más frecuente: {p['Opción más frecuente']} | Veces respondida: {p['Veces respondida']}")
+        y -= 30
+
     pdf.save()
     buffer.seek(0)
     return buffer
@@ -112,34 +146,37 @@ st.set_page_config(page_title="Plickers IA Analyzer", layout="centered")
 
 st.title("Plickers IA Analyzer")
 st.write("""
-Esta herramienta permite analizar automáticamente los resultados exportados desde **Plickers**, 
-generando retroalimentación personalizada para cada alumno y sugerencias para rediseñar las sesiones 
-de aprendizaje según el desempeño observado.
+Esta aplicación analiza automáticamente los resultados descargados desde **Plickers**, 
+sin necesidad de conexión de los alumnos a internet ni de editar el archivo.
+Ofrece sugerencias de retroalimentación individual y propone ajustes al docente para rediseñar las sesiones.
 """)
 
-archivo = st.file_uploader("📁 Sube el archivo CSV exportado desde Plickers", type=["csv"])
+archivo = st.file_uploader("Sube el archivo CSV de Plickers", type=["csv"])
 nombre_asignatura = st.text_input("Nombre de la asignatura:")
 
 if archivo and nombre_asignatura:
     df = procesar_archivo(archivo)
     if df is not None:
-        st.success("Archivo cargado correctamente.")
+        st.success("Archivo procesado correctamente.")
         st.dataframe(df.head())
 
-        promedio, sugerencias = analizar_resultados(df)
+        promedio, sugerencias, resumen_preguntas = analizar_resultados(df)
 
-        st.subheader("Análisis general del grupo")
-        st.write(f"**Promedio general:** {round(promedio,2)}%")
+        st.subheader("Análisis General del Grupo")
+        st.write(f"Promedio general: {round(promedio, 2)}%")
 
-        st.subheader("Sugerencias por alumno")
+        st.subheader("Sugerencias Individuales")
         st.dataframe(pd.DataFrame(sugerencias))
 
-        # Generar PDF
-        pdf_buffer = generar_pdf(promedio, sugerencias, nombre_asignatura)
+        st.subheader("Preguntas más representativas")
+        st.dataframe(pd.DataFrame(resumen_preguntas))
+
+        pdf = generar_pdf(promedio, sugerencias, resumen_preguntas, nombre_asignatura)
         st.download_button(
-            label="Descargar reporte PDF",
-            data=pdf_buffer,
+            label="Descargar Reporte en PDF",
+            data=pdf,
             file_name=f"Reporte_{nombre_asignatura}.pdf",
             mime="application/pdf"
         )
+
 
