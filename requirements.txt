@@ -5,3 +5,4 @@ scikit-learn
 reportlab
 openpyxl
 google-genai
+fpdf
