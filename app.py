@@ -8,17 +8,17 @@ import os
 from fpdf import FPDF
 import base64
 from dataclasses import dataclass 
-from collections import defaultdict # Para el mapeo genérico de tópicos
+from collections import defaultdict 
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ==============================================================================
-# CONFIGURACIÓN INICIAL Y CLAVE API
+# CONFIGURACIÓN INICIAL
 # ==============================================================================
 THRESHOLD_ACIERTO = 0.60 
 
 # La API de Gemini ha sido eliminada.
-gemini_status = "❌ La conexión a Gemini ha sido removida."
+gemini_status = "ℹ️ Análisis en modo **Estático (sin IA externa)**. Tópicos y recomendaciones son genéricas."
 
 
 # ==============================================================================
@@ -95,7 +95,7 @@ class EvaluacionAnalizer:
         
         st.info("📊 Realizando análisis estadístico y generando recomendaciones genéricas...")
 
-        # 1. Tópicos (AQUÍ SE USA LA FUNCIÓN ESTÁTICA SIN IA)
+        # 1. Tópicos (FUNCIÓN ESTÁTICA SIN IA)
         question_topics = generate_generic_topics(_self.question_cols)
 
         # 2. Acierto por Pregunta y Tópico
@@ -109,7 +109,6 @@ class EvaluacionAnalizer:
             list(acierto_por_pregunta.items()), 
             columns=['Pregunta', '% Acierto']
         )
-        # Asignar tópicos generados
         df_acierto_pregunta['Tópico'] = df_acierto_pregunta['Pregunta'].map(question_topics)
 
         # 3. Acierto por Tópico y Críticos
@@ -119,7 +118,7 @@ class EvaluacionAnalizer:
         
         topicos_criticos = acierto_por_topico[acierto_por_topico['% Acierto'] < THRESHOLD_ACIERTO]
         
-        # 4. Generar Recomendaciones Docentes (AQUÍ SE USA LA FUNCIÓN ESTÁTICA SIN IA)
+        # 4. Generar Recomendaciones Docentes (FUNCIÓN ESTÁTICA SIN IA)
         docente_recs = generar_generic_recomendaciones_docentes(topicos_criticos)
         alumnos_recs = _self._generar_recomendaciones_alumnos_interno(alumnos_list)
         
@@ -229,7 +228,6 @@ def load_and_clean_data(csv_file_content):
 def generate_generic_topics(question_cols):
     """Asigna tópicos genéricos y cíclicos a las preguntas basándose en su posición."""
     
-    # Definir una lista de tópicos genéricos comunes en evaluaciones
     generic_topics_pool = [
         'Unidad 1: Conceptos Fundamentales',
         'Unidad 2: Aplicación y Ejercicios',
@@ -239,7 +237,7 @@ def generate_generic_topics(question_cols):
     
     topic_map = defaultdict(lambda: 'Tópico General')
     
-    # Asignación cíclica: Q1, Q5, Q9 -> Unidad 1; Q2, Q6, Q10 -> Unidad 2, etc.
+    # Asignación cíclica para distribuir el análisis
     num_topics = len(generic_topics_pool)
     for i, q_col in enumerate(question_cols):
         topic_index = i % num_topics
@@ -288,7 +286,7 @@ def generar_generic_recomendaciones_docentes(topicos_criticos_df):
 # ==============================================================================
 
 def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_criticos, docente_recs, alumnos_recs, df_acierto_pregunta):
-    """Genera el PDF usando FPDF, con soporte mejorado para caracteres UTF-8/Latin-1."""
+    """Genera el PDF usando FPDF, asegurando la compatibilidad con versiones estándar."""
 
     class PDF(FPDF):
         def header(self):
@@ -320,7 +318,7 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
             self.set_font('Arial', '', 10)
             # Reemplazar **negritas** y *cursivas* antes de codificar
             body_cleaned = body.replace('**', '').replace('* ', '').replace('*', '') 
-            # Solución: Codificar/Decodificar para evitar el error de latin-1
+            # Codificar/Decodificar para asegurar el paso correcto de strings Unicode a FPDF
             self.multi_cell(0, 5, body_cleaned.encode('latin-1', 'replace').decode('latin-1'))
             self.ln(4)
 
@@ -344,8 +342,6 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
             self.ln(5)
 
     pdf = PDF('P', 'mm', 'Letter')
-    # Configuración de codificación para manejar caracteres especiales (acentos, ñ, etc.)
-    pdf.set_doc_option('core_fonts_encoding', 'latin-1') 
     pdf.add_page()
     
     # Generar gráficos temporales para el PDF
@@ -432,7 +428,7 @@ def main():
         initial_sidebar_state="expanded"
     )
 
-    st.title("👨🏫 Analista Pedagógico Avanzado (Modo Estático)")
+    st.title("👨‍🏫 Analista Pedagógico Avanzado (Modo Estático)")
     st.subheader("Generación de Reportes Dinámicos de Evaluación sin IA Externa")
     
     st.info(gemini_status)
@@ -483,7 +479,7 @@ def main():
     tab_docente, tab_visual, tab_alumnos, tab_detalle = st.tabs([
         "✅ Resumen y Recomendaciones Docentes", 
         "📊 Visualizaciones Clave", 
-        "🧑🎓 Rendimiento Individual", 
+        "🧑‍🎓 Rendimiento Individual", 
         "📋 Detalle por Pregunta"
     ])
 
@@ -570,5 +566,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
