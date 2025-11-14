@@ -19,8 +19,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ==============================================================================
 THRESHOLD_ACIERTO = 0.60 
 
-# La variable CLIENT ya no es global ni se pasa directamente a funciones cacheables.
-# Solo se usa la clave API.
+# La clave API se lee del entorno.
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', None)
 gemini_status = "❌ La clave GEMINI_API_KEY no está configurada o falló la inicialización."
 client = None
@@ -38,7 +37,7 @@ else:
 
 
 # ==============================================================================
-# CLASES DE POO (HASHABLE)
+# CLASES DE POO (HASHABLE - SOLUCIÓN AL ERROR DE CACHÉ DE STREAMLIT)
 # ==============================================================================
 
 @dataclass(frozen=True) 
@@ -50,26 +49,26 @@ class Alumno:
     question_cols: list 
 
     def __post_init__(self):
+        # Uso de object.__setattr__ para permitir la asignación en una dataclass frozen
         object.__setattr__(self, 'nombre_completo', f"{self.first_name} {self.last_name}")
         object.__setattr__(self, 'score_percent', int(self.score_num * 100))
 
     def get_recomendacion_personal(self):
         """Genera una recomendación de refuerzo personalizada."""
         
-        if self.score_percent >= 70:
+        if self.score_percent >= 0.70:
             return f"{self.nombre_completo} ({self.score_percent}%) tuvo un rendimiento **satisfactorio** y no requiere refuerzo intensivo."
         else:
             return f"**{self.nombre_completo} ({self.score_percent}%)**: Refuerzo intensivo. Revisar fichas de estudio, crear un glosario personal y practicar ejercicios de los tópicos críticos."
 
 @dataclass(frozen=True) 
 class EvaluacionAnalizer:
-    """Encapsula toda la lógica de análisis estadístico. Solo guarda datos de entrada."""
+    """Encapsula toda la lógica de análisis estadístico. Solo guarda datos de entrada hashable."""
     df_data: pd.DataFrame 
     answer_key: dict
     question_cols: list
-    # NO INCLUIMOS EL CLIENTE EN EL DATACLASS para evitar problemas de hashing, 
-    # se accede a la clave API en las funciones cacheables.
-    
+    # No se incluye 'client' para evitar UnhashableParamError.
+
     def _crear_objetos_alumnos(self):
         """Crea la lista de objetos Alumno y el DataFrame de rendimiento."""
         alumnos_list = []
@@ -110,7 +109,7 @@ class EvaluacionAnalizer:
         
         st.info("🧠 Generando tópicos dinámicos y realizando cálculos estadísticos...")
 
-        # 1. Tópicos (AQUÍ SE PASA LA CLAVE API, NO EL OBJETO CLIENT)
+        # Las funciones de IA son llamadas SIN pasar el objeto 'client'
         question_topics = generate_topics_with_gemini(_self.question_cols)
 
         # 2. Acierto por Pregunta y Tópico
@@ -133,7 +132,7 @@ class EvaluacionAnalizer:
         
         topicos_criticos = acierto_por_topico[acierto_por_topico['% Acierto'] < THRESHOLD_ACIERTO]
         
-        # 4. Generar Recomendaciones Docentes (AQUÍ SE PASA LA CLAVE API, NO EL OBJETO CLIENT)
+        # 4. Generar Recomendaciones
         docente_recs = generar_recomendaciones_gemini(topicos_criticos)
         alumnos_recs = _self._generar_recomendaciones_alumnos_interno(alumnos_list)
         
@@ -240,15 +239,13 @@ def load_and_clean_data(csv_file_content):
     return df, answer_key, question_cols
 
 @st.cache_data
-# YA NO RECIBE gemini_client
 def generate_topics_with_gemini(question_cols):
     """Genera tópicos pedagógicos para cada pregunta usando la API de Gemini."""
+    global GEMINI_API_KEY
     
     if not GEMINI_API_KEY:
-        # Fallback si no hay clave API
         return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
     
-    # Intenta inicializar el cliente internamente si la clave existe
     try:
         local_client = genai.Client() 
     except Exception:
@@ -265,7 +262,6 @@ def generate_topics_with_gemini(question_cols):
     """
     
     try:
-        # Usa el cliente local
         response = local_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
@@ -290,9 +286,10 @@ def generate_topics_with_gemini(question_cols):
         return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
 
 @st.cache_data
-# YA NO RECIBE gemini_client
 def generar_recomendaciones_gemini(topicos_criticos_df):
     """Genera recomendaciones pedagógicas específicas usando la API de Gemini."""
+    global GEMINI_API_KEY
+
     if topicos_criticos_df.empty:
         return "No se encontraron tópicos con rendimiento inferior al 60%. Excelente trabajo."
     
@@ -321,7 +318,6 @@ def generar_recomendaciones_gemini(topicos_criticos_df):
     """
     
     try:
-        # Usa el cliente local
         response = local_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
@@ -333,21 +329,22 @@ def generar_recomendaciones_gemini(topicos_criticos_df):
         return f"❌ ERROR DE API: Falló la conexión con Gemini ({e}). Se usará una recomendación genérica."
 
 # ==============================================================================
-# VISUALIZACIÓN EN STREAMLIT y PDF (Sin Cambios)
+# VISUALIZACIÓN EN STREAMLIT y PDF (CORRECCIÓN DE ENCODING LATIN-1)
 # ==============================================================================
 
 def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_criticos, docente_recs, alumnos_recs, df_acierto_pregunta):
-    """Genera el PDF usando FPDF (función de respaldo para la descarga)."""
+    """Genera el PDF usando FPDF, con soporte mejorado para caracteres UTF-8/Latin-1."""
 
     class PDF(FPDF):
         def header(self):
             self.set_y(10)
             self.set_font('Arial', 'B', 16)
             self.cell(40) 
-            self.cell(0, 10, 'REPORTE PEDAGÓGICO AVANZADO', 0, 1, 'C') 
+            # Aseguramos que el título maneje acentos
+            self.cell(0, 10, 'REPORTE PEDAGÓGICO AVANZADO'.encode('latin-1', 'replace').decode('latin-1'), 0, 1, 'C') 
             self.set_font('Arial', '', 11)
             self.cell(40) 
-            self.cell(0, 5, 'Análisis Dinámico de Resultados de Evaluación', 0, 1, 'C')
+            self.cell(0, 5, 'Análisis Dinámico de Resultados de Evaluación'.encode('latin-1', 'replace').decode('latin-1'), 0, 1, 'C')
             self.set_line_width(0.5)
             self.line(10, 28, 205, 28)
             self.ln(7)
@@ -359,18 +356,20 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
             if not docente_recs.startswith("❌ ERROR DE API") and not docente_recs.startswith("❌ ERROR: Cliente Gemini"):
                 ai_status = "Análisis Generado por Analista Pedagógico (Gemini)"
 
-            self.cell(0, 10, f'{ai_status} | Página {self.page_no()}', 0, 0, 'R')
+            self.cell(0, 10, f'{ai_status} | Página {self.page_no()}'.encode('latin-1', 'replace').decode('latin-1'), 0, 0, 'R')
 
         def chapter_title(self, title):
             self.set_font('Arial', 'B', 12)
             self.set_fill_color(230, 230, 230) 
-            self.cell(0, 8, title, 0, 1, 'L', fill=True)
+            # Aseguramos que el título maneje acentos
+            self.cell(0, 8, title.encode('latin-1', 'replace').decode('latin-1'), 0, 1, 'L', fill=True)
             self.ln(2)
 
         def chapter_body(self, body):
             self.set_font('Arial', '', 10)
             body_cleaned = body.replace('*', '').replace('**', '') 
-            self.multi_cell(0, 5, body_cleaned)
+            # Solución: Codificar/Decodificar para evitar el error de latin-1
+            self.multi_cell(0, 5, body_cleaned.encode('latin-1', 'replace').decode('latin-1'))
             self.ln(4)
 
         def print_dataframe(self, df, title, col_widths=None):
@@ -380,17 +379,21 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
                 col_widths = [self.w / (len(df.columns) + 1)] * len(df.columns)
 
             for i, header in enumerate(df.columns):
-                self.cell(col_widths[i], 7, header, 1, 0, 'C', fill=True) 
+                header_text = header.encode('latin-1', 'replace').decode('latin-1')
+                self.cell(col_widths[i], 7, header_text, 1, 0, 'C', fill=True) 
             self.ln()
 
             self.set_font('Arial', '', 9)
             for _, row in df.iterrows():
                 for i, item in enumerate(row.values):
-                    self.cell(col_widths[i], 7, str(item), 1, 0, 'C')
+                    item_text = str(item).encode('latin-1', 'replace').decode('latin-1')
+                    self.cell(col_widths[i], 7, item_text, 1, 0, 'C')
                 self.ln()
             self.ln(5)
 
     pdf = PDF('P', 'mm', 'Letter')
+    # Configuración de codificación para manejar caracteres especiales (acentos, ñ, etc.)
+    pdf.set_doc_option('core_fonts_encoding', 'latin-1') 
     pdf.add_page()
     
     # Generar gráficos temporales para el PDF
@@ -467,10 +470,11 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
     os.remove(plot_path_1)
     os.remove(plot_path_2)
 
+    # La salida final que fue causando el error, ahora debe ser compatible
     return pdf.output(dest='S').encode('latin-1') 
 
 # ==============================================================================
-# FUNCIÓN PRINCIPAL (Simplificada con POO)
+# FUNCIÓN PRINCIPAL 
 # ==============================================================================
 
 def main():
@@ -511,15 +515,13 @@ def main():
         st.error(f"❌ Error crítico al procesar el archivo: {e}")
         return
         
-    # Análisis y Cálculo: Ahora todo se maneja dentro de la clase Analizer
-    
-    # 1. Inicializar el objeto (SOLO con datos de entrada hashable)
+    # Inicializar el objeto Analizer (solo con datos hashable)
     analizer_instance = EvaluacionAnalizer(df_data, answer_key, question_cols)
 
-    # 2. Llamar al método cacheado para obtener los resultados
+    # Llamar al método cacheado para obtener los resultados
     analisis_resultados = analizer_instance.analizar(THRESHOLD_ACIERTO) 
     
-    # 3. Asignar resultados para la visualización
+    # Desempacar resultados
     alumnos_list = analisis_resultados['alumnos_list']
     acierto_por_topico = analisis_resultados['acierto_por_topico']
     rendimiento_alumnos_df = analisis_resultados['rendimiento_alumnos_df']
@@ -625,7 +627,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 
