@@ -10,7 +10,7 @@ from google import genai
 from google.genai.errors import APIError
 from fpdf import FPDF
 import base64
-from dataclasses import dataclass # <-- NUEVO: Para hacer hashable la clase Alumno
+from dataclasses import dataclass # Importación esencial para la solución de caché
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -25,16 +25,17 @@ gemini_status = "❌ La clave GEMINI_API_KEY no está configurada o falló la in
 
 if 'GEMINI_API_KEY' in os.environ and os.environ['GEMINI_API_KEY']:
     try:
+        # Intenta inicializar el cliente solo si la clave existe
         client = genai.Client()
         gemini_status = "✅ Cliente Gemini inicializado correctamente."
     except Exception as e:
         gemini_status = f"⚠️ Advertencia: Error al inicializar el cliente de Gemini ({e}). Las funciones de IA no estarán disponibles."
 
 # ==============================================================================
-# CLASES DE POO (MEJORADA Y HASHABLE)
+# CLASES DE POO (SOLUCIÓN UNHASHABLEPARAMERROR)
 # ==============================================================================
 
-@dataclass(frozen=True) # frozen=True hace la clase inmutable y hashable para Streamlit
+@dataclass(frozen=True) # SOLUCIÓN 1/2: Hace la clase inmutable y hashable
 class Alumno:
     """Representa a un único estudiante y su rendimiento en la evaluación."""
     first_name: str
@@ -44,6 +45,7 @@ class Alumno:
 
     # Calcula atributos derivados después de la inicialización
     def __post_init__(self):
+        # Uso de object.__setattr__ para permitir la asignación en una dataclass frozen
         object.__setattr__(self, 'nombre_completo', f"{self.first_name} {self.last_name}")
         object.__setattr__(self, 'score_percent', int(self.score_num * 100))
 
@@ -55,25 +57,18 @@ class Alumno:
         else:
             return f"**{self.nombre_completo} ({self.score_percent}%)**: Refuerzo intensivo. Revisar fichas de estudio, crear un glosario personal y practicar ejercicios de los tópicos críticos."
 
+@dataclass(frozen=True) # SOLUCIÓN 2/2: Hace la clase analizer hashable
 class EvaluacionAnalizer:
-    """Encapsula toda la lógica de análisis estadístico, POO y generación de recomendaciones."""
-    def __init__(self, df_data, answer_key, question_cols, gemini_client):
-        self.df_data = df_data
-        self.answer_key = answer_key
-        self.question_cols = question_cols
-        self.client = gemini_client
-        
-        # Atributos de resultados que se llenarán en el método 'analizar'
-        self.alumnos_list = []
-        self.acierto_por_topico = None
-        self.rendimiento_alumnos_df = None
-        self.topicos_criticos = None
-        self.df_acierto_pregunta = None
-        self.docente_recs = None
-        self.alumnos_recs = None
-
+    """Encapsula toda la lógica de análisis estadístico. Solo guarda datos de entrada."""
+    # Los DataFrames de Pandas son hashable (implicando que no cambian)
+    df_data: pd.DataFrame 
+    answer_key: dict
+    question_cols: list
+    client: genai.Client 
+    
     def _crear_objetos_alumnos(self):
         """Crea la lista de objetos Alumno y el DataFrame de rendimiento."""
+        alumnos_list = []
         for index, row in self.df_data.iterrows():
             alumno = Alumno(
                 first_name=row['First name'],
@@ -81,19 +76,21 @@ class EvaluacionAnalizer:
                 score_num=row['Score_num'],
                 question_cols=self.question_cols
             )
-            self.alumnos_list.append(alumno)
+            alumnos_list.append(alumno)
         
         # DataFrame de rendimiento para compatibilidad con visualizaciones
         rendimiento_data = {
-            'Nombre Completo': [a.nombre_completo for a in self.alumnos_list],
-            'Score_num': [a.score_num for a in self.alumnos_list]
+            'Nombre Completo': [a.nombre_completo for a in alumnos_list],
+            'Score_num': [a.score_num for a in alumnos_list]
         }
-        self.rendimiento_alumnos_df = pd.DataFrame(rendimiento_data).sort_values(by='Score_num')
+        rendimiento_alumnos_df = pd.DataFrame(rendimiento_data).sort_values(by='Score_num')
+        
+        return alumnos_list, rendimiento_alumnos_df
 
-    def _generar_recomendaciones_alumnos_interno(self):
-        """Genera recomendaciones individuales usando los objetos Alumno."""
+    def _generar_recomendaciones_alumnos_interno(self, alumnos_list):
+        """Genera recomendaciones individuales usando la lista de objetos Alumno."""
         recs = []
-        for alumno in self.alumnos_list:
+        for alumno in alumnos_list:
             if alumno.score_num < 0.70:
                 recs.append(alumno.get_recomendacion_personal())
                 
@@ -102,15 +99,13 @@ class EvaluacionAnalizer:
         
         return "\n".join(recs)
     
-    # Se utiliza @st.cache_data en la clase para que Streamlit sepa que 
-    # queremos cachear los resultados de todo este proceso.
-    @st.cache_data(show_spinner=False)
+    @st.cache_data(show_spinner=True) # Se cachea el proceso de análisis
     def analizar(_self, THRESHOLD_ACIERTO):
-        """Ejecuta la lógica completa de análisis de la evaluación."""
-        _self._crear_objetos_alumnos()
+        """Ejecuta la lógica completa de análisis de la evaluación y retorna un diccionario de resultados."""
         
-        st.info("🧠 Generando tópicos dinámicos y realizando cálculos estadísticos...")
-
+        # Generar objetos de la clase Alumno
+        alumnos_list, rendimiento_alumnos_df = _self._crear_objetos_alumnos()
+        
         # 1. Tópicos (Usa la función cacheada)
         question_topics = generate_topics_with_gemini(_self.question_cols, _self.client)
 
@@ -121,29 +116,36 @@ class EvaluacionAnalizer:
             total_respuestas = len(_self.df_data) 
             acierto_por_pregunta[q_col] = aciertos / total_respuestas if total_respuestas > 0 else 0
 
-        _self.df_acierto_pregunta = pd.DataFrame(
+        df_acierto_pregunta = pd.DataFrame(
             list(acierto_por_pregunta.items()), 
             columns=['Pregunta', '% Acierto']
         )
-        _self.df_acierto_pregunta['Tópico'] = _self.df_acierto_pregunta['Pregunta'].map(question_topics)
+        df_acierto_pregunta['Tópico'] = df_acierto_pregunta['Pregunta'].map(question_topics)
 
         # 3. Acierto por Tópico y Críticos
-        _self.acierto_por_topico = _self.df_acierto_pregunta.groupby('Tópico')['% Acierto'].mean().reset_index()
-        _self.acierto_por_topico['% Acierto'] = _self.acierto_por_topico['% Acierto'].round(2)
-        _self.acierto_por_topico = _self.acierto_por_topico.sort_values(by='% Acierto')
+        acierto_por_topico = df_acierto_pregunta.groupby('Tópico')['% Acierto'].mean().reset_index()
+        acierto_por_topico['% Acierto'] = acierto_por_topico['% Acierto'].round(2)
+        acierto_por_topico = acierto_por_topico.sort_values(by='% Acierto')
         
-        _self.topicos_criticos = _self.acierto_por_topico[_self.acierto_por_topico['% Acierto'] < THRESHOLD_ACIERTO]
+        topicos_criticos = acierto_por_topico[acierto_por_topico['% Acierto'] < THRESHOLD_ACIERTO]
         
         # 4. Generar Recomendaciones (Usa la función cacheable/genérica)
-        _self.docente_recs = generar_recomendaciones_gemini(_self.topicos_criticos, _self.client)
-        _self.alumnos_recs = _self._generar_recomendaciones_alumnos_interno()
+        docente_recs = generar_recomendaciones_gemini(topicos_criticos, _self.client)
+        alumnos_recs = _self._generar_recomendaciones_alumnos_interno(alumnos_list)
         
-        # Retornamos el objeto 'self' para mantener la interfaz de cacheo si es necesario
-        return _self
-
+        # RETORNAR TODOS LOS RESULTADOS EN UN DICCIONARIO
+        return {
+            'alumnos_list': alumnos_list,
+            'acierto_por_topico': acierto_por_topico,
+            'rendimiento_alumnos_df': rendimiento_alumnos_df,
+            'topicos_criticos': topicos_criticos,
+            'df_acierto_pregunta': df_acierto_pregunta,
+            'docente_recs': docente_recs,
+            'alumnos_recs': alumnos_recs,
+        }
 
 # ==============================================================================
-# FUNCIONES CENTRALES (Solo quedan las funciones de carga y Gemini, que se cachan)
+# FUNCIONES CENTRALES
 # ==============================================================================
 
 @st.cache_data
@@ -316,7 +318,7 @@ def generar_recomendaciones_gemini(topicos_criticos_df, gemini_client):
         return f"❌ ERROR DE API: Falló la conexión con Gemini ({e}). Se usará una recomendación genérica."
 
 # ==============================================================================
-# VISUALIZACIÓN EN STREAMLIT y PDF (Sin Cambios)
+# VISUALIZACIÓN EN STREAMLIT y PDF
 # ==============================================================================
 
 def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_criticos, docente_recs, alumnos_recs, df_acierto_pregunta):
@@ -495,20 +497,29 @@ def main():
         return
         
     # Análisis y Cálculo: Ahora todo se maneja dentro de la clase Analizer
-    analizer = EvaluacionAnalizer(df_data, answer_key, question_cols, client)
-    # Llama al método que ejecuta todos los cálculos (incluye la caché)
-    analizer = analizer.analizar(THRESHOLD_ACIERTO) 
     
-    st.success(f"✅ Análisis completado para {len(analizer.alumnos_list)} alumnos y {len(analizer.question_cols)} preguntas.")
+    # 1. Inicializar el objeto (SÓLO con los datos de entrada, que son hashable)
+    analizer_instance = EvaluacionAnalizer(df_data, answer_key, question_cols, client)
 
-    # Los resultados se toman directamente de los atributos del objeto
-    docente_recs = analizer.docente_recs
-    alumnos_recs = analizer.alumnos_recs
+    # 2. Llamar al método cacheado para obtener los resultados
+    # 'analisis_resultados' es un diccionario que contiene todos los DataFrames y textos
+    analisis_resultados = analizer_instance.analizar(THRESHOLD_ACIERTO) 
+    
+    # 3. Asignar resultados para la visualización
+    alumnos_list = analisis_resultados['alumnos_list']
+    acierto_por_topico = analisis_resultados['acierto_por_topico']
+    rendimiento_alumnos_df = analisis_resultados['rendimiento_alumnos_df']
+    topicos_criticos = analisis_resultados['topicos_criticos']
+    df_acierto_pregunta = analisis_resultados['df_acierto_pregunta']
+    docente_recs = analisis_resultados['docente_recs']
+    alumnos_recs = analisis_resultados['alumnos_recs']
+    
+    st.success(f"✅ Análisis completado para {len(alumnos_list)} alumnos y {len(analizer_instance.question_cols)} preguntas.")
 
     st.markdown("---")
     
     # ==========================================================================
-    # PESTAÑAS DE VISUALIZACIÓN (Usan los atributos del objeto analizer)
+    # PESTAÑAS DE VISUALIZACIÓN (Usan las variables del diccionario 'analisis_resultados')
     # ==========================================================================
     tab_docente, tab_visual, tab_alumnos, tab_detalle = st.tabs([
         "✅ Resumen y Recomendaciones Docentes", 
@@ -519,11 +530,11 @@ def main():
 
     with tab_docente:
         st.header("1. Tópicos Críticos (Acierto Colectivo < 60%)")
-        if analizer.topicos_criticos.empty:
+        if topicos_criticos.empty:
             st.success("🎉 ¡Excelente! No se identificaron tópicos con rendimiento crítico. No es necesario refuerzo colectivo.")
         else:
-            st.warning(f"⚠️ Se identificaron **{len(analizer.topicos_criticos)} tópicos** con acierto por debajo del {int(THRESHOLD_ACIERTO*100)}% que requieren refuerzo.")
-            topicos_criticos_display = analizer.topicos_criticos.copy()
+            st.warning(f"⚠️ Se identificaron **{len(topicos_criticos)} tópicos** con acierto por debajo del {int(THRESHOLD_ACIERTO*100)}% que requieren refuerzo.")
+            topicos_criticos_display = topicos_criticos.copy()
             topicos_criticos_display['% Acierto'] = (topicos_criticos_display['% Acierto'] * 100).astype(int).astype(str) + '%'
             st.dataframe(topicos_criticos_display.set_index('Tópico'), use_container_width=True)
 
@@ -533,8 +544,8 @@ def main():
     with tab_visual:
         st.header("Gráfico 2.1: Rendimiento Colectivo por Tópico")
         fig1, ax1 = plt.subplots(figsize=(10, 6))
-        colors = ['red' if acierto < THRESHOLD_ACIERTO else 'green' for acierto in analizer.acierto_por_topico['% Acierto']]
-        ax1.bar(analizer.acierto_por_topico['Tópico'], analizer.acierto_por_topico['% Acierto'], color=colors)
+        colors = ['red' if acierto < THRESHOLD_ACIERTO else 'green' for acierto in acierto_por_topico['% Acierto']]
+        ax1.bar(acierto_por_topico['Tópico'], acierto_por_topico['% Acierto'], color=colors)
         ax1.set_title('Rendimiento Colectivo por Tópico')
         ax1.set_ylabel('% de Acierto Colectivo')
         ax1.set_xlabel('Tópico Inferido')
@@ -547,7 +558,7 @@ def main():
 
         st.header("Gráfico 2.2: Distribución de Rendimiento por Alumno")
         fig2, ax2 = plt.subplots(figsize=(8, 5))
-        scores_percent = analizer.rendimiento_alumnos_df['Score_num'] * 100
+        scores_percent = rendimiento_alumnos_df['Score_num'] * 100
         ax2.hist(scores_percent, bins=range(0, 101, 10), edgecolor='black', color='skyblue')
         ax2.axvline(70, color='red', linestyle='--', linewidth=1, label='Bajo Rendimiento (<70%)')
         ax2.set_title('Distribución de Rendimiento por Alumno')
@@ -561,7 +572,7 @@ def main():
 
     with tab_alumnos:
         st.header("Rendimiento Individual por Alumno")
-        rendimiento_alumnos_display = analizer.rendimiento_alumnos_df.copy()
+        rendimiento_alumnos_display = rendimiento_alumnos_df.copy()
         rendimiento_alumnos_display['Rendimiento Final'] = (rendimiento_alumnos_display['Score_num'] * 100).astype(int).astype(str) + '%'
         rendimiento_alumnos_display = rendimiento_alumnos_display.drop(columns=['Score_num'])
         rendimiento_alumnos_display = rendimiento_alumnos_display.rename(columns={'Nombre Completo': 'Alumno'})
@@ -573,7 +584,7 @@ def main():
 
     with tab_detalle:
         st.header("Detalle de Acierto por Pregunta")
-        df_display = analizer.df_acierto_pregunta.copy()
+        df_display = df_acierto_pregunta.copy()
         df_display['% Acierto'] = (df_display['% Acierto'] * 100).round(0).astype(int).astype(str) + '%'
         st.dataframe(
             df_display.sort_values(by='% Acierto', ascending=False).set_index('Tópico'), 
@@ -583,12 +594,12 @@ def main():
     st.markdown("---")
     # --- Descarga del PDF ---
     pdf_output = generate_report_pdf(
-        analizer.acierto_por_topico, 
-        analizer.rendimiento_alumnos_df, 
-        analizer.topicos_criticos, 
+        acierto_por_topico, 
+        rendimiento_alumnos_df, 
+        topicos_criticos, 
         docente_recs, 
         alumnos_recs, 
-        analizer.df_acierto_pregunta
+        df_acierto_pregunta
     )
     
     st.download_button(
