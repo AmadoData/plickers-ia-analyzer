@@ -2,17 +2,19 @@ streamlit
 
 pandas
 
-numpy
-
 matplotlib
 
-fpdf
+scikit-learn
+
+reportlab
 
 openpyxl
 
-google-genai  
+google-genai
 
-requests
+fpdf
+
+
 
 
 
