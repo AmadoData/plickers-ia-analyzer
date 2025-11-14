@@ -8,146 +8,33 @@ import os
 import json 
 from google import genai
 from google.genai.errors import APIError
-from fpdf import FPDF
-import base64
-from dataclasses import dataclass 
+from fpdf import FPDF # Necesario para generar el PDF si el usuario lo solicita
+import base64 # Necesario para la descarga del PDF en Streamlit
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ==============================================================================
 # CONFIGURACIÓN INICIAL Y CLAVE API
 # ==============================================================================
+# La clave API se debe configurar como un secreto en Streamlit Cloud
+# o como una variable de entorno local: GEMINI_API_KEY
+if 'GEMINI_API_KEY' not in os.environ:
+    st.error("❌ ERROR: La variable de entorno 'GEMINI_API_KEY' no está configurada.")
+    st.error("Por favor, configúrela para usar las funciones de análisis de Gemini.")
+    st.stop()
+    
 THRESHOLD_ACIERTO = 0.60 
 
-# La clave API se lee del entorno.
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', None)
-gemini_status = "❌ La clave GEMINI_API_KEY no está configurada o falló la inicialización."
-client = None
-
-if GEMINI_API_KEY:
-    try:
-        # Intentar inicializar el cliente fuera del flujo de cacheo si es necesario
-        client = genai.Client() 
-        gemini_status = "✅ Cliente Gemini inicializado correctamente."
-    except Exception as e:
-        client = None
-        gemini_status = f"⚠️ Advertencia: Error al inicializar el cliente de Gemini ({e}). Las funciones de IA no estarán disponibles."
-else:
-    client = None
+# Inicializa el cliente de Gemini
+try:
+    client = genai.Client()
+except Exception as e:
+    st.error(f"Error al inicializar el cliente de Gemini: {e}")
+    st.stop()
 
 
 # ==============================================================================
-# CLASES DE POO (HASHABLE - SOLUCIÓN AL ERROR DE CACHÉ DE STREAMLIT)
-# ==============================================================================
-
-@dataclass(frozen=True) 
-class Alumno:
-    """Representa a un único estudiante y su rendimiento en la evaluación."""
-    first_name: str
-    last_name: str
-    score_num: float
-    question_cols: list 
-
-    def __post_init__(self):
-        # Uso de object.__setattr__ para permitir la asignación en una dataclass frozen
-        object.__setattr__(self, 'nombre_completo', f"{self.first_name} {self.last_name}")
-        object.__setattr__(self, 'score_percent', int(self.score_num * 100))
-
-    def get_recomendacion_personal(self):
-        """Genera una recomendación de refuerzo personalizada."""
-        
-        if self.score_percent >= 0.70:
-            return f"{self.nombre_completo} ({self.score_percent}%) tuvo un rendimiento **satisfactorio** y no requiere refuerzo intensivo."
-        else:
-            return f"**{self.nombre_completo} ({self.score_percent}%)**: Refuerzo intensivo. Revisar fichas de estudio, crear un glosario personal y practicar ejercicios de los tópicos críticos."
-
-@dataclass(frozen=True) 
-class EvaluacionAnalizer:
-    """Encapsula toda la lógica de análisis estadístico. Solo guarda datos de entrada hashable."""
-    df_data: pd.DataFrame 
-    answer_key: dict
-    question_cols: list
-    # No se incluye 'client' para evitar UnhashableParamError.
-
-    def _crear_objetos_alumnos(self):
-        """Crea la lista de objetos Alumno y el DataFrame de rendimiento."""
-        alumnos_list = []
-        for index, row in self.df_data.iterrows():
-            alumno = Alumno(
-                first_name=row['First name'],
-                last_name=row['Last Name'],
-                score_num=row['Score_num'],
-                question_cols=self.question_cols
-            )
-            alumnos_list.append(alumno)
-        
-        rendimiento_data = {
-            'Nombre Completo': [a.nombre_completo for a in alumnos_list],
-            'Score_num': [a.score_num for a in alumnos_list]
-        }
-        rendimiento_alumnos_df = pd.DataFrame(rendimiento_data).sort_values(by='Score_num')
-        
-        return alumnos_list, rendimiento_alumnos_df
-
-    def _generar_recomendaciones_alumnos_interno(self, alumnos_list):
-        """Genera recomendaciones individuales usando la lista de objetos Alumno."""
-        recs = []
-        for alumno in alumnos_list:
-            if alumno.score_num < 0.70:
-                recs.append(alumno.get_recomendacion_personal())
-                
-        if not recs:
-            return "No se identificaron alumnos con rendimiento inferior al 70% (Bajo Rendimiento)."
-        
-        return "\n".join(recs)
-    
-    @st.cache_data(show_spinner=True) 
-    def analizar(_self, THRESHOLD_ACIERTO):
-        """Ejecuta la lógica completa de análisis de la evaluación y retorna un diccionario de resultados."""
-        
-        alumnos_list, rendimiento_alumnos_df = _self._crear_objetos_alumnos()
-        
-        st.info("🧠 Generando tópicos dinámicos y realizando cálculos estadísticos...")
-
-        # Las funciones de IA son llamadas SIN pasar el objeto 'client'
-        question_topics = generate_topics_with_gemini(_self.question_cols)
-
-        # 2. Acierto por Pregunta y Tópico
-        acierto_por_pregunta = {}
-        for q_col in _self.question_cols:
-            aciertos = (_self.df_data[q_col] == _self.answer_key[q_col]).sum()
-            total_respuestas = len(_self.df_data) 
-            acierto_por_pregunta[q_col] = aciertos / total_respuestas if total_respuestas > 0 else 0
-
-        df_acierto_pregunta = pd.DataFrame(
-            list(acierto_por_pregunta.items()), 
-            columns=['Pregunta', '% Acierto']
-        )
-        df_acierto_pregunta['Tópico'] = df_acierto_pregunta['Pregunta'].map(question_topics)
-
-        # 3. Acierto por Tópico y Críticos
-        acierto_por_topico = df_acierto_pregunta.groupby('Tópico')['% Acierto'].mean().reset_index()
-        acierto_por_topico['% Acierto'] = acierto_por_topico['% Acierto'].round(2)
-        acierto_por_topico = acierto_por_topico.sort_values(by='% Acierto')
-        
-        topicos_criticos = acierto_por_topico[acierto_por_topico['% Acierto'] < THRESHOLD_ACIERTO]
-        
-        # 4. Generar Recomendaciones
-        docente_recs = generar_recomendaciones_gemini(topicos_criticos)
-        alumnos_recs = _self._generar_recomendaciones_alumnos_interno(alumnos_list)
-        
-        return {
-            'alumnos_list': alumnos_list,
-            'acierto_por_topico': acierto_por_topico,
-            'rendimiento_alumnos_df': rendimiento_alumnos_df,
-            'topicos_criticos': topicos_criticos,
-            'df_acierto_pregunta': df_acierto_pregunta,
-            'docente_recs': docente_recs,
-            'alumnos_recs': alumnos_recs,
-        }
-
-# ==============================================================================
-# FUNCIONES CENTRALES (MODIFICADAS PARA NO RECIBIR OBJETO CLIENTE)
+# FUNCIONES CENTRALES (Adaptadas para Streamlit)
 # ==============================================================================
 
 @st.cache_data
@@ -161,12 +48,13 @@ def load_and_clean_data(csv_file_content):
         if 'Card Number' in line or 'First name' in line:
             header_idx = i
             break
-    
+
     if header_idx == -1:
         raise ValueError("No se pudo identificar la fila de encabezado (buscando 'Card Number' o 'First name').")
     
     skip_rows_count = header_idx
-    
+
+    # Lectura robusta (Coma o Punto y coma)
     try:
         df = pd.read_csv(
             io.StringIO(csv_data), 
@@ -177,6 +65,7 @@ def load_and_clean_data(csv_file_content):
             engine='python'
         )
     except Exception:
+         # Fallback para archivos con separador ';'
         df = pd.read_csv(
             io.StringIO(csv_data), 
             skiprows=skip_rows_count, 
@@ -185,7 +74,8 @@ def load_and_clean_data(csv_file_content):
             quotechar='"', 
             engine='python'
         )
-    
+
+    # Limpieza y estandarización de columnas
     df.columns = df.columns.astype(str).str.replace(r'\n', ' ', regex=True).str.strip()
     col_keywords = {'Score': 'Score', 'Correct': 'Correct', 'Answered': 'Answered', 
                     'Card': 'Card Number', 'First': 'First name', 'Last': 'Last Name'}
@@ -193,7 +83,7 @@ def load_and_clean_data(csv_file_content):
     for current_col in df.columns:
         found_match = False
         for keyword, standardized_name in col_keywords.items():
-            if keyword in current_col: 
+            if keyword in current_col:
                 new_column_names[current_col] = standardized_name
                 found_match = True
                 break
@@ -205,28 +95,30 @@ def load_and_clean_data(csv_file_content):
     if not all(col in df.columns for col in required_cols):
          missing = [col for col in required_cols if col not in df.columns]
          raise ValueError(f"Columnas esenciales no encontradas. Faltantes: {missing}. Columnas disponibles: {df.columns.tolist()}")
-    
+
     df = df.dropna(how='all')
     
     standard_cols = ['Card Number', 'First name', 'Last Name', 'Score', 'Correct', 'Answered']
     question_cols = [col for col in df.columns if col not in standard_cols]
     
+    # Detección de la fila de respuestas correctas
     answer_key_row = None
     answer_key_index = -1
     
     num_questions = len(question_cols)
+    # Umbral dinámico: Mínimo 3 respuestas válidas o la mitad del total
     threshold = max(3, int(num_questions / 2)) 
     
     for i in range(len(df)):
         row = df.iloc[i][question_cols].dropna().astype(str).str.upper()
         if len(row[(row.isin(['A', 'B', 'C', 'D']))]) >= threshold:
-           answer_key_row = df.iloc[i]
-           answer_key_index = df.index[i]
-           break
-    
+            answer_key_row = df.iloc[i]
+            answer_key_index = df.index[i]
+            break
+
     if answer_key_row is None:
         raise ValueError("No se pudo detectar la fila de respuestas correctas (Answer Key).")
-    
+        
     answer_key = answer_key_row[question_cols].to_dict()
     df = df.drop(answer_key_index).reset_index(drop=True) 
     
@@ -235,34 +127,26 @@ def load_and_clean_data(csv_file_content):
     
     for col in question_cols:
         df[col] = df[col].astype(str).str.upper().str.strip().str[0]
-    
+
     return df, answer_key, question_cols
 
 @st.cache_data
 def generate_topics_with_gemini(question_cols):
     """Genera tópicos pedagógicos para cada pregunta usando la API de Gemini."""
-    global GEMINI_API_KEY
     
-    if not GEMINI_API_KEY:
-        return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
-    
-    try:
-        local_client = genai.Client() 
-    except Exception:
-        return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
-
-
     questions_list_str = "\n".join([f"\"{q}\"" for q in question_cols])
     
     prompt = f"""
     Eres un experto en currículum y análisis de contenido educativo. Te proporcionaré una lista de preguntas de examen. Tu tarea es asignar un nombre de 'Tópico Pedagógico' conciso (máximo 4 palabras) y relevante a cada pregunta.
+
     Proporciona tu respuesta **estrictamente en formato JSON**, donde la **clave** sea el texto COMPLETO de la pregunta (incluyendo comillas si las tiene) y el **valor** sea el 'Tópico Pedagógico' que le asignaste. No incluyas ninguna otra explicación o texto fuera del objeto JSON.
+
     PREGUNTAS:
     {questions_list_str}
     """
     
     try:
-        response = local_client.models.generate_content(
+        response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
         )
@@ -279,27 +163,49 @@ def generate_topics_with_gemini(question_cols):
         for q in question_cols:
             if q not in final_topic_map:
                 final_topic_map[q] = 'Tópico No Mapeado'
+                     
         return final_topic_map
         
     except Exception as e:
         st.warning(f"❌ ERROR al generar tópicos con Gemini: {e}. Usando tópicos genéricos.")
-        return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
+        return {q: 'Tópico Genérico (Fallo API)' for q in question_cols}
+
+@st.cache_data
+def analyze_and_calculate(df_data, answer_key, question_cols):
+    """Realiza todos los cálculos de acierto por pregunta, tópico y alumno."""
+    
+    st.info("🧠 Generando tópicos dinámicos con IA y realizando cálculos estadísticos...")
+    question_topics = generate_topics_with_gemini(question_cols)
+
+    acierto_por_pregunta = {}
+    for q_col in question_cols:
+        aciertos = (df_data[q_col] == answer_key[q_col]).sum()
+        total_respuestas = len(df_data) 
+        acierto_por_pregunta[q_col] = aciertos / total_respuestas if total_respuestas > 0 else 0
+
+    df_acierto_pregunta = pd.DataFrame(
+        list(acierto_por_pregunta.items()), 
+        columns=['Pregunta', '% Acierto']
+    )
+    df_acierto_pregunta['Tópico'] = df_acierto_pregunta['Pregunta'].map(question_topics)
+
+    acierto_por_topico = df_acierto_pregunta.groupby('Tópico')['% Acierto'].mean().reset_index()
+    acierto_por_topico['% Acierto'] = acierto_por_topico['% Acierto'].round(2)
+    acierto_por_topico = acierto_por_topico.sort_values(by='% Acierto')
+
+    rendimiento_alumnos = df_data[['First name', 'Last Name', 'Score_num']].copy()
+    rendimiento_alumnos['Nombre Completo'] = rendimiento_alumnos['First name'] + ' ' + rendimiento_alumnos['Last Name']
+    rendimiento_alumnos = rendimiento_alumnos.drop(columns=['First name', 'Last Name']).sort_values(by='Score_num')
+
+    topicos_criticos = acierto_por_topico[acierto_por_topico['% Acierto'] < THRESHOLD_ACIERTO]
+    
+    return acierto_por_topico, rendimiento_alumnos, topicos_criticos, df_acierto_pregunta
 
 @st.cache_data
 def generar_recomendaciones_gemini(topicos_criticos_df):
     """Genera recomendaciones pedagógicas específicas usando la API de Gemini."""
-    global GEMINI_API_KEY
-
     if topicos_criticos_df.empty:
         return "No se encontraron tópicos con rendimiento inferior al 60%. Excelente trabajo."
-    
-    if not GEMINI_API_KEY:
-        return "❌ ERROR DE API: Clave Gemini no configurada. Se usará una recomendación genérica."
-
-    try:
-        local_client = genai.Client() 
-    except Exception:
-        return "❌ ERROR DE API: Cliente Gemini no inicializado. Se usará una recomendación genérica."
 
     topicos_data = topicos_criticos_df.copy()
     topicos_data['% Acierto'] = (topicos_data['% Acierto'] * 100).astype(int).astype(str) + '%'
@@ -309,42 +215,59 @@ def generar_recomendaciones_gemini(topicos_criticos_df):
     Eres un analista pedagógico experto. Basándote en la siguiente tabla de Tópicos Críticos
     de un examen, donde el acierto colectivo fue inferior al 60%, genera recomendaciones
     pedagógicas específicas para el docente.
+
     La respuesta debe ser una lista numerada, una recomendación por cada tópico crítico.
-    Cada recomendación debe ser concisa, práctica, y enfocada a la acción (ej. 'Realizar un debate
-    sobre...').
+    Cada recomendación debe ser concisa, práctica, y enfocada a la acción (ej. 'Realizar un debate sobre...').
     No incluyas introducciones ni conclusiones, solo la lista de recomendaciones.
+
     TÓPICOS CRÍTICOS:
     {topicos_criticos_str}
     """
     
     try:
-        response = local_client.models.generate_content(
+        response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
         )
         
+        # Formato como lista markdown
         return response.text.strip().replace('\n\n', '\n')
         
     except Exception as e:
         return f"❌ ERROR DE API: Falló la conexión con Gemini ({e}). Se usará una recomendación genérica."
 
+def generar_recomendaciones_alumnos(rendimiento_df):
+    """Genera recomendaciones personalizadas para alumnos con bajo rendimiento (< 70%)."""
+    alumnos_bajo_rendimiento = rendimiento_df[rendimiento_df['Score_num'] < 0.70]
+    alumnos_list = alumnos_bajo_rendimiento['Nombre Completo'].tolist()
+    
+    if not alumnos_list:
+        return "No se identificaron alumnos con rendimiento inferior al 70% (Bajo Rendimiento)."
+    
+    recs = []
+    for nombre in alumnos_list:
+        score_percent = int(rendimiento_df[rendimiento_df['Nombre Completo'] == nombre]['Score_num'].iloc[0] * 100)
+        recs.append(f"**{nombre} ({score_percent}%)**: Refuerzo intensivo. Revisar fichas de estudio, crear un glosario personal y practicar ejercicios de los tópicos críticos.")
+        
+    return "\n".join(recs)
+
 # ==============================================================================
-# VISUALIZACIÓN EN STREAMLIT y PDF (CORRECCIÓN DE ENCODING LATIN-1)
+# VISUALIZACIÓN EN STREAMLIT
 # ==============================================================================
 
 def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_criticos, docente_recs, alumnos_recs, df_acierto_pregunta):
-    """Genera el PDF usando FPDF, con soporte mejorado para caracteres UTF-8/Latin-1."""
+    """Genera el PDF usando FPDF (función de respaldo para la descarga)."""
 
     class PDF(FPDF):
+        # El código FPDF se deja intacto para la generación del PDF de descarga
         def header(self):
             self.set_y(10)
             self.set_font('Arial', 'B', 16)
             self.cell(40) 
-            # Aseguramos que el título maneje acentos
-            self.cell(0, 10, 'REPORTE PEDAGÓGICO AVANZADO'.encode('latin-1', 'replace').decode('latin-1'), 0, 1, 'C') 
+            self.cell(0, 10, 'REPORTE PEDAGÓGICO AVANZADO', 0, 1, 'C') 
             self.set_font('Arial', '', 11)
             self.cell(40) 
-            self.cell(0, 5, 'Análisis Dinámico de Resultados de Evaluación'.encode('latin-1', 'replace').decode('latin-1'), 0, 1, 'C')
+            self.cell(0, 5, 'Análisis Dinámico de Resultados de Evaluación', 0, 1, 'C')
             self.set_line_width(0.5)
             self.line(10, 28, 205, 28)
             self.ln(7)
@@ -352,24 +275,17 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
         def footer(self):
             self.set_y(-15)
             self.set_font('Arial', 'I', 9)
-            ai_status = "Análisis Estadístico Básico"
-            if not docente_recs.startswith("❌ ERROR DE API") and not docente_recs.startswith("❌ ERROR: Cliente Gemini"):
-                ai_status = "Análisis Generado por Analista Pedagógico (Gemini)"
-
-            self.cell(0, 10, f'{ai_status} | Página {self.page_no()}'.encode('latin-1', 'replace').decode('latin-1'), 0, 0, 'R')
+            self.cell(0, 10, 'Análisis Generado por Analista Pedagógico (Gemini) | Página ' + str(self.page_no()), 0, 0, 'R')
 
         def chapter_title(self, title):
             self.set_font('Arial', 'B', 12)
             self.set_fill_color(230, 230, 230) 
-            # Aseguramos que el título maneje acentos
-            self.cell(0, 8, title.encode('latin-1', 'replace').decode('latin-1'), 0, 1, 'L', fill=True)
+            self.cell(0, 8, title, 0, 1, 'L', fill=True)
             self.ln(2)
 
         def chapter_body(self, body):
             self.set_font('Arial', '', 10)
-            body_cleaned = body.replace('*', '').replace('**', '') 
-            # Solución: Codificar/Decodificar para evitar el error de latin-1
-            self.multi_cell(0, 5, body_cleaned.encode('latin-1', 'replace').decode('latin-1'))
+            self.multi_cell(0, 5, body)
             self.ln(4)
 
         def print_dataframe(self, df, title, col_widths=None):
@@ -379,21 +295,17 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
                 col_widths = [self.w / (len(df.columns) + 1)] * len(df.columns)
 
             for i, header in enumerate(df.columns):
-                header_text = header.encode('latin-1', 'replace').decode('latin-1')
-                self.cell(col_widths[i], 7, header_text, 1, 0, 'C', fill=True) 
+                self.cell(col_widths[i], 7, header, 1, 0, 'C', fill=True) 
             self.ln()
 
             self.set_font('Arial', '', 9)
             for _, row in df.iterrows():
                 for i, item in enumerate(row.values):
-                    item_text = str(item).encode('latin-1', 'replace').decode('latin-1')
-                    self.cell(col_widths[i], 7, item_text, 1, 0, 'C')
+                    self.cell(col_widths[i], 7, str(item), 1, 0, 'C')
                 self.ln()
             self.ln(5)
 
     pdf = PDF('P', 'mm', 'Letter')
-    # Configuración de codificación para manejar caracteres especiales (acentos, ñ, etc.)
-    pdf.set_doc_option('core_fonts_encoding', 'latin-1') 
     pdf.add_page()
     
     # Generar gráficos temporales para el PDF
@@ -409,7 +321,7 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
     plt.tight_layout()
     plot_path_1 = 'temp_plot_topicos.png'
     fig1.savefig(plot_path_1, bbox_inches='tight')
-    plt.close(fig1) 
+    plt.close(fig1)
 
     fig2, ax2 = plt.subplots(figsize=(8, 5))
     scores_percent = rendimiento_alumnos['Score_num'] * 100
@@ -423,7 +335,7 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
     plt.tight_layout()
     plot_path_2 = 'temp_plot_distribucion.png'
     fig2.savefig(plot_path_2, bbox_inches='tight')
-    plt.close(fig2) 
+    plt.close(fig2)
     
     # Contenido del PDF
     pdf.chapter_title('1. Resumen de Tópicos Críticos (Acierto Colectivo < 60%)')
@@ -433,7 +345,7 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
         topicos_criticos_display = topicos_criticos.copy()
         topicos_criticos_display['% Acierto'] = (topicos_criticos_display['% Acierto'] * 100).astype(int).astype(str) + '%'
         pdf.print_dataframe(topicos_criticos_display, 'Tópicos Críticos (Bajo Rendimiento)', col_widths=[120, 40])
-
+        
     pdf.add_page()
     pdf.chapter_title('2. Visualización de Rendimiento')
     
@@ -448,12 +360,7 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
     pdf.set_y(y_g2 + 80)
     
     pdf.add_page() 
-    
-    recs_title = '3. Recomendaciones Docentes (Generado por Gemini)'
-    if docente_recs.startswith("❌ ERROR DE API") or docente_recs.startswith("❌ ERROR: Cliente Gemini"):
-        recs_title = '3. Recomendaciones Docentes (Generadas por Fallback Estadístico)'
-        
-    pdf.chapter_title(recs_title)
+    pdf.chapter_title('3. Recomendaciones Docentes (Generado por Gemini)')
     pdf.chapter_body(docente_recs)
     
     pdf.chapter_title('4. Rendimiento Individual y Refuerzo Personalizado')
@@ -464,35 +371,24 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
     pdf.print_dataframe(rendimiento_alumnos_display, 'Tabla de Rendimiento de Alumnos', col_widths=[100, 50])
     
     pdf.chapter_title('4.1. Recomendaciones para Alumnos con Rendimiento < 70%')
-    pdf.chapter_body(alumnos_recs.replace("**", "")) 
+    pdf.chapter_body(alumnos_recs.replace("**", "")) # Quitar negritas para FPDF
 
     # Limpieza de archivos temporales
     os.remove(plot_path_1)
     os.remove(plot_path_2)
 
-    # La salida final que fue causando el error, ahora debe ser compatible
-    return pdf.output(dest='S').encode('latin-1') 
+    return pdf.output(dest='S').encode('latin-1')
 
-# ==============================================================================
-# FUNCIÓN PRINCIPAL 
-# ==============================================================================
 
 def main():
-    global gemini_status 
-    
     st.set_page_config(
         page_title="Analista Pedagógico Avanzado (Gemini)",
         layout="wide",
         initial_sidebar_state="expanded"
     )
 
-    st.title("👨‍🏫 Analista Pedagógico Avanzado con Gemini")
+    st.title("👨🏫 Analista Pedagógico Avanzado con Gemini")
     st.subheader("Generación de Reportes Dinámicos de Evaluación")
-    
-    if client is None:
-        st.warning(gemini_status)
-    else:
-        st.success(gemini_status)
 
     # --- Carga de Archivo ---
     uploaded_file = st.file_uploader(
@@ -510,37 +406,29 @@ def main():
         df_data, answer_key, question_cols = load_and_clean_data(uploaded_file)
     except ValueError as e:
         st.error(f"❌ Error de Carga/Formato de Datos: {e}")
-        return
+        st.stop()
     except Exception as e:
         st.error(f"❌ Error crítico al procesar el archivo: {e}")
-        return
+        st.stop()
         
-    # Inicializar el objeto Analizer (solo con datos hashable)
-    analizer_instance = EvaluacionAnalizer(df_data, answer_key, question_cols)
+    # Análisis y Cálculo (Incluye llamada a Gemini para tópicos)
+    acierto_por_topico, rendimiento_alumnos, topicos_criticos, df_acierto_pregunta = analyze_and_calculate(df_data, answer_key, question_cols)
+    
+    st.success(f"✅ Análisis completado para {len(rendimiento_alumnos)} alumnos y {len(question_cols)} preguntas.")
 
-    # Llamar al método cacheado para obtener los resultados
-    analisis_resultados = analizer_instance.analizar(THRESHOLD_ACIERTO) 
-    
-    # Desempacar resultados
-    alumnos_list = analisis_resultados['alumnos_list']
-    acierto_por_topico = analisis_resultados['acierto_por_topico']
-    rendimiento_alumnos_df = analisis_resultados['rendimiento_alumnos_df']
-    topicos_criticos = analisis_resultados['topicos_criticos']
-    df_acierto_pregunta = analisis_resultados['df_acierto_pregunta']
-    docente_recs = analisis_resultados['docente_recs']
-    alumnos_recs = analisis_resultados['alumnos_recs']
-    
-    st.success(f"✅ Análisis completado para {len(alumnos_list)} alumnos y {len(analizer_instance.question_cols)} preguntas.")
+    # --- Generación de Recomendaciones ---
+    docente_recs = generar_recomendaciones_gemini(topicos_criticos)
+    alumnos_recs = generar_recomendaciones_alumnos(rendimiento_alumnos)
 
     st.markdown("---")
     
     # ==========================================================================
-    # PESTAÑAS DE VISUALIZACIÓN 
+    # PESTAÑAS DE VISUALIZACIÓN
     # ==========================================================================
     tab_docente, tab_visual, tab_alumnos, tab_detalle = st.tabs([
         "✅ Resumen y Recomendaciones Docentes", 
         "📊 Visualizaciones Clave", 
-        "🧑‍🎓 Rendimiento Individual", 
+        "🧑🎓 Rendimiento Individual", 
         "📋 Detalle por Pregunta"
     ])
 
@@ -570,11 +458,10 @@ def main():
         ax1.legend()
         plt.tight_layout()
         st.pyplot(fig1)
-        plt.close(fig1) 
 
         st.header("Gráfico 2.2: Distribución de Rendimiento por Alumno")
         fig2, ax2 = plt.subplots(figsize=(8, 5))
-        scores_percent = rendimiento_alumnos_df['Score_num'] * 100
+        scores_percent = rendimiento_alumnos['Score_num'] * 100
         ax2.hist(scores_percent, bins=range(0, 101, 10), edgecolor='black', color='skyblue')
         ax2.axvline(70, color='red', linestyle='--', linewidth=1, label='Bajo Rendimiento (<70%)')
         ax2.set_title('Distribución de Rendimiento por Alumno')
@@ -584,11 +471,10 @@ def main():
         ax2.legend()
         plt.tight_layout()
         st.pyplot(fig2)
-        plt.close(fig2) 
 
     with tab_alumnos:
         st.header("Rendimiento Individual por Alumno")
-        rendimiento_alumnos_display = rendimiento_alumnos_df.copy()
+        rendimiento_alumnos_display = rendimiento_alumnos.copy()
         rendimiento_alumnos_display['Rendimiento Final'] = (rendimiento_alumnos_display['Score_num'] * 100).astype(int).astype(str) + '%'
         rendimiento_alumnos_display = rendimiento_alumnos_display.drop(columns=['Score_num'])
         rendimiento_alumnos_display = rendimiento_alumnos_display.rename(columns={'Nombre Completo': 'Alumno'})
@@ -609,14 +495,7 @@ def main():
 
     st.markdown("---")
     # --- Descarga del PDF ---
-    pdf_output = generate_report_pdf(
-        acierto_por_topico, 
-        rendimiento_alumnos_df, 
-        topicos_criticos, 
-        docente_recs, 
-        alumnos_recs, 
-        df_acierto_pregunta
-    )
+    pdf_output = generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_criticos, docente_recs, alumnos_recs, df_acierto_pregunta)
     
     st.download_button(
         label="⬇️ Descargar Reporte Completo en PDF",
@@ -627,6 +506,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
