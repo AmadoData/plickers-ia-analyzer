@@ -10,7 +10,7 @@ from google import genai
 from google.genai.errors import APIError
 from fpdf import FPDF
 import base64
-from dataclasses import dataclass # Importación esencial para la solución de caché
+from dataclasses import dataclass 
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -19,23 +19,29 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ==============================================================================
 THRESHOLD_ACIERTO = 0.60 
 
-# Inicializa el cliente de Gemini y la API key
-client = None
+# La variable CLIENT ya no es global ni se pasa directamente a funciones cacheables.
+# Solo se usa la clave API.
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', None)
 gemini_status = "❌ La clave GEMINI_API_KEY no está configurada o falló la inicialización."
+client = None
 
-if 'GEMINI_API_KEY' in os.environ and os.environ['GEMINI_API_KEY']:
+if GEMINI_API_KEY:
     try:
-        # Intenta inicializar el cliente solo si la clave existe
-        client = genai.Client()
+        # Intentar inicializar el cliente fuera del flujo de cacheo si es necesario
+        client = genai.Client() 
         gemini_status = "✅ Cliente Gemini inicializado correctamente."
     except Exception as e:
+        client = None
         gemini_status = f"⚠️ Advertencia: Error al inicializar el cliente de Gemini ({e}). Las funciones de IA no estarán disponibles."
+else:
+    client = None
+
 
 # ==============================================================================
-# CLASES DE POO (SOLUCIÓN UNHASHABLEPARAMERROR)
+# CLASES DE POO (HASHABLE)
 # ==============================================================================
 
-@dataclass(frozen=True) # SOLUCIÓN 1/2: Hace la clase inmutable y hashable
+@dataclass(frozen=True) 
 class Alumno:
     """Representa a un único estudiante y su rendimiento en la evaluación."""
     first_name: str
@@ -43,9 +49,7 @@ class Alumno:
     score_num: float
     question_cols: list 
 
-    # Calcula atributos derivados después de la inicialización
     def __post_init__(self):
-        # Uso de object.__setattr__ para permitir la asignación en una dataclass frozen
         object.__setattr__(self, 'nombre_completo', f"{self.first_name} {self.last_name}")
         object.__setattr__(self, 'score_percent', int(self.score_num * 100))
 
@@ -57,14 +61,14 @@ class Alumno:
         else:
             return f"**{self.nombre_completo} ({self.score_percent}%)**: Refuerzo intensivo. Revisar fichas de estudio, crear un glosario personal y practicar ejercicios de los tópicos críticos."
 
-@dataclass(frozen=True) # SOLUCIÓN 2/2: Hace la clase analizer hashable
+@dataclass(frozen=True) 
 class EvaluacionAnalizer:
     """Encapsula toda la lógica de análisis estadístico. Solo guarda datos de entrada."""
-    # Los DataFrames de Pandas son hashable (implicando que no cambian)
     df_data: pd.DataFrame 
     answer_key: dict
     question_cols: list
-    client: genai.Client 
+    # NO INCLUIMOS EL CLIENTE EN EL DATACLASS para evitar problemas de hashing, 
+    # se accede a la clave API en las funciones cacheables.
     
     def _crear_objetos_alumnos(self):
         """Crea la lista de objetos Alumno y el DataFrame de rendimiento."""
@@ -78,7 +82,6 @@ class EvaluacionAnalizer:
             )
             alumnos_list.append(alumno)
         
-        # DataFrame de rendimiento para compatibilidad con visualizaciones
         rendimiento_data = {
             'Nombre Completo': [a.nombre_completo for a in alumnos_list],
             'Score_num': [a.score_num for a in alumnos_list]
@@ -99,15 +102,16 @@ class EvaluacionAnalizer:
         
         return "\n".join(recs)
     
-    @st.cache_data(show_spinner=True) # Se cachea el proceso de análisis
+    @st.cache_data(show_spinner=True) 
     def analizar(_self, THRESHOLD_ACIERTO):
         """Ejecuta la lógica completa de análisis de la evaluación y retorna un diccionario de resultados."""
         
-        # Generar objetos de la clase Alumno
         alumnos_list, rendimiento_alumnos_df = _self._crear_objetos_alumnos()
         
-        # 1. Tópicos (Usa la función cacheada)
-        question_topics = generate_topics_with_gemini(_self.question_cols, _self.client)
+        st.info("🧠 Generando tópicos dinámicos y realizando cálculos estadísticos...")
+
+        # 1. Tópicos (AQUÍ SE PASA LA CLAVE API, NO EL OBJETO CLIENT)
+        question_topics = generate_topics_with_gemini(_self.question_cols)
 
         # 2. Acierto por Pregunta y Tópico
         acierto_por_pregunta = {}
@@ -129,11 +133,10 @@ class EvaluacionAnalizer:
         
         topicos_criticos = acierto_por_topico[acierto_por_topico['% Acierto'] < THRESHOLD_ACIERTO]
         
-        # 4. Generar Recomendaciones (Usa la función cacheable/genérica)
-        docente_recs = generar_recomendaciones_gemini(topicos_criticos, _self.client)
+        # 4. Generar Recomendaciones Docentes (AQUÍ SE PASA LA CLAVE API, NO EL OBJETO CLIENT)
+        docente_recs = generar_recomendaciones_gemini(topicos_criticos)
         alumnos_recs = _self._generar_recomendaciones_alumnos_interno(alumnos_list)
         
-        # RETORNAR TODOS LOS RESULTADOS EN UN DICCIONARIO
         return {
             'alumnos_list': alumnos_list,
             'acierto_por_topico': acierto_por_topico,
@@ -145,7 +148,7 @@ class EvaluacionAnalizer:
         }
 
 # ==============================================================================
-# FUNCIONES CENTRALES
+# FUNCIONES CENTRALES (MODIFICADAS PARA NO RECIBIR OBJETO CLIENTE)
 # ==============================================================================
 
 @st.cache_data
@@ -165,7 +168,6 @@ def load_and_clean_data(csv_file_content):
     
     skip_rows_count = header_idx
     
-    # Lectura robusta (Coma o Punto y coma)
     try:
         df = pd.read_csv(
             io.StringIO(csv_data), 
@@ -176,7 +178,6 @@ def load_and_clean_data(csv_file_content):
             engine='python'
         )
     except Exception:
-        # Fallback para archivos con separador ';'
         df = pd.read_csv(
             io.StringIO(csv_data), 
             skiprows=skip_rows_count, 
@@ -186,7 +187,6 @@ def load_and_clean_data(csv_file_content):
             engine='python'
         )
     
-    # Limpieza y estandarización de columnas
     df.columns = df.columns.astype(str).str.replace(r'\n', ' ', regex=True).str.strip()
     col_keywords = {'Score': 'Score', 'Correct': 'Correct', 'Answered': 'Answered', 
                     'Card': 'Card Number', 'First': 'First name', 'Last': 'Last Name'}
@@ -212,12 +212,10 @@ def load_and_clean_data(csv_file_content):
     standard_cols = ['Card Number', 'First name', 'Last Name', 'Score', 'Correct', 'Answered']
     question_cols = [col for col in df.columns if col not in standard_cols]
     
-    # Detección de la fila de respuestas correctas
     answer_key_row = None
     answer_key_index = -1
     
     num_questions = len(question_cols)
-    # Umbral dinámico: Mínimo 3 respuestas válidas o la mitad del total
     threshold = max(3, int(num_questions / 2)) 
     
     for i in range(len(df)):
@@ -242,12 +240,21 @@ def load_and_clean_data(csv_file_content):
     return df, answer_key, question_cols
 
 @st.cache_data
-def generate_topics_with_gemini(question_cols, gemini_client):
+# YA NO RECIBE gemini_client
+def generate_topics_with_gemini(question_cols):
     """Genera tópicos pedagógicos para cada pregunta usando la API de Gemini."""
     
-    if gemini_client is None:
+    if not GEMINI_API_KEY:
+        # Fallback si no hay clave API
         return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
     
+    # Intenta inicializar el cliente internamente si la clave existe
+    try:
+        local_client = genai.Client() 
+    except Exception:
+        return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
+
+
     questions_list_str = "\n".join([f"\"{q}\"" for q in question_cols])
     
     prompt = f"""
@@ -258,7 +265,8 @@ def generate_topics_with_gemini(question_cols, gemini_client):
     """
     
     try:
-        response = gemini_client.models.generate_content(
+        # Usa el cliente local
+        response = local_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
         )
@@ -282,12 +290,18 @@ def generate_topics_with_gemini(question_cols, gemini_client):
         return {q: f'Tópico Genérico {i+1}' for i, q in enumerate(question_cols)}
 
 @st.cache_data
-def generar_recomendaciones_gemini(topicos_criticos_df, gemini_client):
+# YA NO RECIBE gemini_client
+def generar_recomendaciones_gemini(topicos_criticos_df):
     """Genera recomendaciones pedagógicas específicas usando la API de Gemini."""
     if topicos_criticos_df.empty:
         return "No se encontraron tópicos con rendimiento inferior al 60%. Excelente trabajo."
     
-    if gemini_client is None:
+    if not GEMINI_API_KEY:
+        return "❌ ERROR DE API: Clave Gemini no configurada. Se usará una recomendación genérica."
+
+    try:
+        local_client = genai.Client() 
+    except Exception:
         return "❌ ERROR DE API: Cliente Gemini no inicializado. Se usará una recomendación genérica."
 
     topicos_data = topicos_criticos_df.copy()
@@ -307,7 +321,8 @@ def generar_recomendaciones_gemini(topicos_criticos_df, gemini_client):
     """
     
     try:
-        response = gemini_client.models.generate_content(
+        # Usa el cliente local
+        response = local_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
         )
@@ -318,7 +333,7 @@ def generar_recomendaciones_gemini(topicos_criticos_df, gemini_client):
         return f"❌ ERROR DE API: Falló la conexión con Gemini ({e}). Se usará una recomendación genérica."
 
 # ==============================================================================
-# VISUALIZACIÓN EN STREAMLIT y PDF
+# VISUALIZACIÓN EN STREAMLIT y PDF (Sin Cambios)
 # ==============================================================================
 
 def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_criticos, docente_recs, alumnos_recs, df_acierto_pregunta):
@@ -459,7 +474,7 @@ def generate_report_pdf(acierto_por_topico, rendimiento_alumnos, topicos_critico
 # ==============================================================================
 
 def main():
-    global client, gemini_status 
+    global gemini_status 
     
     st.set_page_config(
         page_title="Analista Pedagógico Avanzado (Gemini)",
@@ -498,11 +513,10 @@ def main():
         
     # Análisis y Cálculo: Ahora todo se maneja dentro de la clase Analizer
     
-    # 1. Inicializar el objeto (SÓLO con los datos de entrada, que son hashable)
-    analizer_instance = EvaluacionAnalizer(df_data, answer_key, question_cols, client)
+    # 1. Inicializar el objeto (SOLO con datos de entrada hashable)
+    analizer_instance = EvaluacionAnalizer(df_data, answer_key, question_cols)
 
     # 2. Llamar al método cacheado para obtener los resultados
-    # 'analisis_resultados' es un diccionario que contiene todos los DataFrames y textos
     analisis_resultados = analizer_instance.analizar(THRESHOLD_ACIERTO) 
     
     # 3. Asignar resultados para la visualización
@@ -519,7 +533,7 @@ def main():
     st.markdown("---")
     
     # ==========================================================================
-    # PESTAÑAS DE VISUALIZACIÓN (Usan las variables del diccionario 'analisis_resultados')
+    # PESTAÑAS DE VISUALIZACIÓN 
     # ==========================================================================
     tab_docente, tab_visual, tab_alumnos, tab_detalle = st.tabs([
         "✅ Resumen y Recomendaciones Docentes", 
