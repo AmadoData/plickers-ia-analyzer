@@ -1,8 +1,8 @@
 streamlit
 pandas
-matplotlib
-scikit-learn
-reportlab
 openpyxl
-google-genai
-fpdf
+reportlab
+requests
+
+
+
